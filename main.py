@@ -1,35 +1,37 @@
-from typing import Optional
+from typing import Optional, Any, List
 from pydantic import BaseModel
 import base64
-import contextlib
 import datetime
-import numpy as np
 import subprocess
 import os
 import requests
 import time
 import torch
-import wave
+import re
 
 from faster_whisper import WhisperModel
-from pyannote.audio import Audio
-from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
-from pyannote.core import Segment
-from sklearn.cluster import AgglomerativeClustering
+from pyannote.audio import Pipeline
 
 class Item(BaseModel):
     # Add your input parameters here
     file_string: Optional[str] = None
     file_url: Optional[str] = None
     group_segments: Optional[bool] = True
-    num_speakers: Optional[int] = 2
-    prompt: Optional[str] = "Some people speaking."
+    prompt: Optional[str] = ""
+    num_speakers: Optional[int] = None
+    language: Optional[str] = None
     offset_seconds: Optional[int] = 0
 
 
-model_name = "large-v2"
-model = WhisperModel(model_name, device="cuda" if torch.cuda.is_available() else "cpu", compute_type="float16")
-embedding_model = PretrainedSpeakerEmbedding("speechbrain/spkrec-ecapa-voxceleb", device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+model_name = "large-v3"
+model = WhisperModel(
+            model_name,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            compute_type="float16")
+diarization_model = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token="").to(
+                torch.device("cuda"))
 
 def predict(item, run_id, logger):
     item = Item(**item)
@@ -76,12 +78,13 @@ def predict(item, run_id, logger):
             if os.path.exists(temp_audio_filename):
                 os.remove(temp_audio_filename)
         
-        segments = speech_to_text(temp_wav_filename, item.num_speakers, item.prompt,
-                                    item.offset_seconds, item.group_segments)
+        segments, detected_num_speakers, detected_language = speech_to_text(temp_wav_filename, item.num_speakers,
+                                           item.prompt, item.offset_seconds,
+                                           item.group_segments, item.language, word_timestamps=True)
 
         print(f'done with inference')
         # Return the results as a JSON object
-        return {"segments": segments}
+        return {"segments": segments, "num_speakers": detected_num_speakers, "language": detected_language}
     except Exception as e:
         raise RuntimeError("Error Running inference with local model", e)
     finally:
@@ -94,68 +97,110 @@ def convert_time(secs, offset_seconds=0):
         return datetime.timedelta(seconds=(round(secs) + offset_seconds))
 
 def speech_to_text(audio_file_wav,
-                    num_speakers=2,
-                    prompt="People takling.",
+                    num_speakers=None,
+                    language=None,
+                    prompt="",
                     offset_seconds=0,
-                    group_segments=True):
+                    group_segments=True,
+                    word_timestamps=True,):
     time_start = time.time()
-
-    # Get duration
-    with contextlib.closing(wave.open(audio_file_wav, 'r')) as f:
-        frames = f.getnframes()
-        rate = f.getframerate()
-        duration = frames / float(rate)
-
     # Transcribe audio
-    print("starting whisper")
+    print("Starting transcribing")
     options = dict(vad_filter=True,
                     initial_prompt=prompt,
-                    word_timestamps=True)
-    segments, _ = model.transcribe(audio_file_wav, **options)
+                    word_timestamps=word_timestamps,
+                    language=language)
+    segments, transcript_info = model.transcribe(audio_file_wav, **options)
     segments = list(segments)
-    print("done with whisper")
     segments = [{
         'start':
-        int(round(s.start + offset_seconds)),
+        float(s.start + offset_seconds),
         'end':
-        int(round(s.end + offset_seconds)),
+        float(s.end + offset_seconds),
         'text':
         s.text,
         'words': [{
-            'start': str(round(w.start + offset_seconds)),
-            'end': str(round(w.end + offset_seconds)),
+            'start': float(w.start + offset_seconds),
+            'end': float(w.end + offset_seconds),
             'word': w.word
         } for w in s.words]
     } for s in segments]
 
-    # Create embedding
-    def segment_embedding(segment):
-        audio = Audio()
-        start = segment["start"]
-        # Whisper overshoots the end timestamp in the last segment
-        end = min(duration, segment["end"])
-        clip = Segment(start, end)
-        waveform, sample_rate = audio.crop(audio_file_wav, clip)
-        return embedding_model(waveform[None])
+    time_transcribing_end = time.time()
+    print(
+        f"Finished with transcribing, took {time_transcribing_end - time_start:.5} seconds"
+    )
 
-    if num_speakers < 2:
-        for segment in segments:
-            segment['speaker'] = 'Speaker 1'
-    else:
-        print("starting embedding")
-        embeddings = np.zeros(shape=(len(segments), 192))
-        for i, segment in enumerate(segments):
-            embeddings[i] = segment_embedding(segment)
-        embeddings = np.nan_to_num(embeddings)
-        print(f'Embedding shape: {embeddings.shape}')
+    diarization = diarization_model(audio_file_wav,
+                                            num_speakers=num_speakers)
 
-        # Assign speaker label
-        clustering = AgglomerativeClustering(num_speakers).fit(
-            embeddings)
-        labels = clustering.labels_
-        for i in range(len(segments)):
-            segments[i]["speaker"] = 'Speaker ' + str(labels[i] + 1)
+    time_diraization_end = time.time()
+    print(
+        f"Finished with diarization, took {time_diraization_end - time_transcribing_end:.5} seconds"
+    )
 
+    # Initialize variables to keep track of the current position in both lists
+    margin = 0.1  # 0.1 seconds margin
+
+    # Initialize an empty list to hold the final segments with speaker info
+    final_segments = []
+
+    diarization_list = list(diarization.itertracks(yield_label=True))
+    unique_speakers = {speaker for _, _, speaker in diarization.itertracks(yield_label=True)}
+    detected_num_speakers = len(unique_speakers)
+
+    speaker_idx = 0
+    n_speakers = len(diarization_list)
+
+    # Iterate over each segment
+    for segment in segments:
+        segment_start = segment['start'] + offset_seconds
+        segment_end = segment['end'] + offset_seconds
+        segment_text = []
+        segment_words = []
+
+        # Iterate over each word in the segment
+        for word in segment['words']:
+            word_start = word['start'] + offset_seconds - margin
+            word_end = word['end'] + offset_seconds + margin
+
+            while speaker_idx < n_speakers:
+                turn, _, speaker = diarization_list[speaker_idx]
+
+                if turn.start <= word_end and turn.end >= word_start:
+                    # Add word without modifications
+                    segment_text.append(word['word'])
+                    
+                    # Strip here for individual word storage
+                    word['word'] = word['word'].strip()
+                    segment_words.append(word)
+
+                    if turn.end <= word_end:
+                        speaker_idx += 1
+
+                    break
+                elif turn.end < word_start:
+                    speaker_idx += 1
+                else:
+                    break
+
+        if segment_text:
+            combined_text = ''.join(segment_text)
+            cleaned_text = re.sub('  ', ' ', combined_text).strip()
+            new_segment = {
+                'start': segment_start - offset_seconds,
+                'end': segment_end - offset_seconds,
+                'speaker': speaker,
+                'text': cleaned_text,
+                'words': segment_words
+            }
+            final_segments.append(new_segment)
+
+    time_merging_end = time.time()
+    print(
+        f"Finished with merging, took {time_merging_end - time_diraization_end:.5} seconds"
+    )
+    segments = final_segments
     # Make output
     output = []  # Initialize an empty list for the output
 
@@ -194,11 +239,13 @@ def speech_to_text(audio_file_wav,
     # Add the last group to the output list
     output.append(current_group)
 
-    print("done with embedding")
+    time_cleaning_end = time.time()
+    print(
+        f"Finished with cleaning, took {time_cleaning_end - time_merging_end:.5} seconds"
+    )
     time_end = time.time()
     time_diff = time_end - time_start
 
-    system_info = f"""-----Processing time: {time_diff:.5} seconds-----"""
+    system_info = f"""Processing time: {time_diff:.5} seconds"""
     print(system_info)
-    os.remove(audio_file_wav)
-    return output
+    return output, detected_num_speakers, transcript_info.language
