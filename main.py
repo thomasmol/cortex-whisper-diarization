@@ -1,3 +1,5 @@
+from cerebrium import get_secret
+
 from typing import Optional, Any, List
 from pydantic import BaseModel
 import base64
@@ -28,9 +30,10 @@ model = WhisperModel(
             model_name,
             device="cuda" if torch.cuda.is_available() else "cpu",
             compute_type="float16")
+hf_token = get_secret("hf_token")
 diarization_model = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token="").to(
+            use_auth_token=hf_token).to(
                 torch.device("cuda"))
 
 def predict(item, run_id, logger):

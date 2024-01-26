@@ -16,7 +16,7 @@ disable_confirmation = false
 [cerebrium.deployment]
 name = "cortex-whisper-diarization"
 python_version = "3.10"
-include = "[./*, main.py]"
+include = "[./*, main.py, requirements.txt, pkglist.txt, conda_pkglist.txt]"
 exclude = "[./.*, ./__*]"
 
 [cerebrium.hardware]
