@@ -79,10 +79,10 @@ def predict(item, run_id, logger):
                 os.remove(temp_audio_filename)
         
         segments, detected_num_speakers, detected_language = speech_to_text(temp_wav_filename, item.num_speakers,
-                                           item.prompt, item.offset_seconds,
-                                           item.group_segments, item.language, word_timestamps=True)
+                                           item.language, item.prompt, item.offset_seconds,
+                                           item.group_segments, word_timestamps=True)
 
-        print(f'done with inference')
+        print('done with inference')
         # Return the results as a JSON object
         return {"segments": segments, "num_speakers": detected_num_speakers, "language": detected_language}
     except Exception as e:
