@@ -31,14 +31,16 @@ cooldown = 60
 
 [cerebrium.dependencies.pip]
 faster-whisper = "==0.10.0"
-torch = "==2.0.1"
-torchtext = "==0.15.2"
-torchvision = "==0.15.2"
-requests = "==2.28.2"
+torch = ">=2.0.1"
+torchtext = ">=0.15.2"
+torchvision = ">=0.15.2"
+requests = ">=2.28.2"
 "pyannote.audio" = "==3.1.1"
 
 [cerebrium.dependencies.conda]
+cuda = "latest"
 
 [cerebrium.dependencies.apt]
 ffmpeg = "latest"
 libmagic1 = "latest"
+libcudnn8 = "latest"

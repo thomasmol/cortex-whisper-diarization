@@ -81,6 +81,7 @@ def predict(item, run_id, logger):
             if os.path.exists(temp_audio_filename):
                 os.remove(temp_audio_filename)
         
+        print('starting inference')
         segments, detected_num_speakers, detected_language = speech_to_text(temp_wav_filename, item.num_speakers,
                                            item.language, item.prompt, item.offset_seconds,
                                            item.group_segments, word_timestamps=True)
