@@ -1,3 +1,2 @@
 ffmpeg
 libmagic1
-libcudnn8
