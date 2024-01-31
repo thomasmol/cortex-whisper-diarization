@@ -1,0 +1,27 @@
+meta {
+  name: Run
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://run.cerebrium.ai/v3/p-d12bf006/cortex-whisper-diarization/predict
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: {{jwt}}
+}
+
+auth:bearer {
+  token: 
+}
+
+body:json {
+  {
+    "file_url": "https://thomasmol.com/recordings/mark-lex-short.mp3",
+    "prompt": "AI, LLama, Mark, Lex",
+    "webhook_endpoint": "https://dazzling-exabyte-21.webhook.cool"
+  }
+}
